@@ -1,0 +1,30 @@
+# Initial Python checks. Docker and the HTML report will be added next.
+name: Task Manager CI
+
+on:
+  push:
+    branches:
+      - main
+      - feature/task-manager-pipeline
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Run task manager
+        run: python .github/scripts/todo.py
+
+      - name: Run unit tests
+        run: python .github/scripts/todo-test.py
