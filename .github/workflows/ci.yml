@@ -1,0 +1,51 @@
+# AI-assisted implementation based on the Lecture 4 activities.
+name: Task Manager CI
+
+on:
+  push:
+    branches:
+      - main
+      - feature/task-manager-pipeline
+
+concurrency:
+  group: task-manager-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Build Docker image
+        run: docker build -t task-manager:latest .
+
+      - name: Run task manager and tests in Docker
+        env:
+          GITHUB_USER: ${{ github.actor }}
+        run: |
+          docker run --rm \
+            --mount "type=bind,source=$PWD,target=/workspace" \
+            -e REPORT_WORKSPACE=/workspace \
+            -e GITHUB_USER \
+            task-manager:latest
+
+      - name: Show HTML report
+        run: cat index.html
+
+      - name: Commit and push HTML report
+        if: github.ref == 'refs/heads/main'
+        run: |
+          git config --local user.name "github-actions[bot]"
+          git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add index.html
+          if git diff --cached --quiet; then
+            echo "HTML report is already up to date."
+          else
+            git commit -m "Workflow: update task manager report"
+            git push origin HEAD:main
+          fi

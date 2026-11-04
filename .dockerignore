@@ -1,0 +1,5 @@
+.git
+**/__pycache__
+*.pyc
+task-output.txt
+test-output.txt
