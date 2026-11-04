@@ -1,0 +1,159 @@
+# Implementation of the Lecture 4 tracker task using the current Projects API.
+# The course starter files for the Python application are separate.
+name: Project Issue Tracker
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, reopened, synchronize, edited, ready_for_review, closed]
+
+permissions:
+  contents: read
+
+jobs:
+  track_issue:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Validate project access and update after merge
+        uses: actions/github-script@v9
+        env:
+          PROJECT_TOKEN: ${{ secrets.PROJECT_TOKEN }}
+        with:
+          script: |
+            const projectOwner = 'chuanzheng03-code';
+            const projectNumber = 1;
+            const token = process.env.PROJECT_TOKEN;
+            if (!token || token.trim() !== token) {
+              throw new Error('PROJECT_TOKEN is missing or has surrounding whitespace.');
+            }
+
+            const eventPr = context.payload.pull_request;
+            if (!eventPr) throw new Error('This workflow requires a pull request event.');
+            if (eventPr.state === 'closed' && !eventPr.merged) {
+              core.info('PR was closed without merging. No project status was changed.');
+              return;
+            }
+
+            const { execFileSync } = require('node:child_process');
+            function queryApi(query, variables) {
+              let response;
+              try {
+                response = execFileSync('curl', [
+                  '--fail-with-body', '--silent', '--show-error',
+                  '--request', 'POST', '--url', 'https://api.github.com/graphql',
+                  '--header', 'Content-Type: application/json',
+                  '--header', `Authorization: Bearer ${token}`,
+                  '--data-binary', '@-'
+                ], {
+                  input: JSON.stringify({ query, variables }),
+                  encoding: 'utf8',
+                  stdio: ['pipe', 'pipe', 'pipe'],
+                  timeout: 30000,
+                  maxBuffer: 4 * 1024 * 1024
+                });
+              } catch {
+                // Do not print the command or exception: it contains the token.
+                throw new Error('GitHub API request failed. Check PROJECT_TOKEN permissions and expiry.');
+              }
+              let result;
+              try { result = JSON.parse(response); }
+              catch { throw new Error('GitHub API returned an invalid response.'); }
+              if (result.errors?.length) {
+                throw new Error(result.errors.map(error => error.message).join('; '));
+              }
+              if (!result.data) throw new Error('GitHub API returned no data.');
+              return result.data;
+            }
+
+            const data = queryApi(`
+              query TrackerData($projectOwner: String!, $projectNumber: Int!,
+                                $owner: String!, $repo: String!, $prNumber: Int!) {
+                user(login: $projectOwner) {
+                  projectV2(number: $projectNumber) {
+                    id
+                    title
+                    fields(first: 100) {
+                      nodes {
+                        ... on ProjectV2SingleSelectField {
+                          id
+                          name
+                          options { id name }
+                        }
+                      }
+                    }
+                  }
+                }
+                repository(owner: $owner, name: $repo) {
+                  pullRequest(number: $prNumber) {
+                    merged
+                    closingIssuesReferences(first: 100) {
+                      totalCount
+                      nodes {
+                        number
+                        repository { nameWithOwner }
+                        projectItems(first: 100) {
+                          nodes {
+                            id
+                            project { id }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            `, {
+              projectOwner, projectNumber,
+              owner: context.repo.owner, repo: context.repo.repo,
+              prNumber: eventPr.number
+            });
+
+            const project = data.user?.projectV2;
+            if (!project) throw new Error('Cannot access the configured user project.');
+            const status = project.fields.nodes.find(field => field?.name === 'Status');
+            const done = status?.options.find(option => option.name === 'Done');
+            if (!status || !done) throw new Error('Project needs a Status field with a Done option.');
+
+            const pr = data.repository?.pullRequest;
+            if (!pr) throw new Error('Cannot access the pull request.');
+            const references = pr.closingIssuesReferences;
+            if (references.totalCount > references.nodes.length) {
+              throw new Error('More than 100 linked issues require pagination before updating.');
+            }
+            const repositoryName = `${context.repo.owner}/${context.repo.repo}`;
+            const issues = references.nodes.filter(issue =>
+              issue.repository.nameWithOwner === repositoryName);
+            if (!issues.length) {
+              throw new Error('No linked issue in this repository. Add Closes #1 to the PR description.');
+            }
+            const targets = issues.map(issue => {
+              const item = issue.projectItems.nodes.find(item => item.project.id === project.id);
+              if (!item) throw new Error(`Issue #${issue.number} is not in the configured project.`);
+              return { number: issue.number, itemId: item.id };
+            });
+
+            core.info(`Project access verified: ${project.title} (project ${projectNumber}).`);
+            core.info(`Linked issues verified: ${targets.map(item => `#${item.number}`).join(', ')}.`);
+            if (eventPr.merged !== true || pr.merged !== true) {
+              core.info('Validation only: PR is not merged. No project status was changed.');
+              return;
+            }
+
+            for (const target of targets) {
+              const updated = queryApi(`
+                mutation SetDone($project: ID!, $item: ID!, $field: ID!, $done: String!) {
+                  updateProjectV2ItemFieldValue(input: {
+                    projectId: $project, itemId: $item, fieldId: $field,
+                    value: { singleSelectOptionId: $done }
+                  }) {
+                    projectV2Item { id }
+                  }
+                }
+              `, { project: project.id, item: target.itemId, field: status.id, done: done.id });
+              if (updated.updateProjectV2ItemFieldValue?.projectV2Item?.id !== target.itemId) {
+                throw new Error(`Could not verify the status update for Issue #${target.number}.`);
+              }
+              core.info(`Issue #${target.number}: Status set to Done.`);
+            }
