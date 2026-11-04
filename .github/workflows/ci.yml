@@ -1,4 +1,4 @@
-# Initial Python checks. Docker and the HTML report will be added next.
+# Python and HTML checks. Docker execution will be added next.
 name: Task Manager CI
 
 on:
@@ -24,7 +24,13 @@ jobs:
           python-version: '3.12'
 
       - name: Run task manager
-        run: python .github/scripts/todo.py
+        run: python .github/scripts/todo.py | tee task-output.txt
 
       - name: Run unit tests
-        run: python .github/scripts/todo-test.py
+        run: python .github/scripts/todo-test.py | tee test-output.txt
+
+      - name: Update HTML report
+        run: bash .github/scripts/update_index.sh task-output.txt test-output.txt
+
+      - name: Show HTML report
+        run: cat index.html
